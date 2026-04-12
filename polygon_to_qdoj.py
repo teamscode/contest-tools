@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
 """
 Usage:
-  python script.py <input_polygon_zip> <output_qdoj_zip>
+  python polygon_to_qdoj.py <input_polygon_zip> <output_qdoj_zip>
 
 - Extracts the Polygon package ZIP
 - Reads problem.xml for limits, tests, and file patterns
 - Reads statement-sections/english/*.tex for description/input/output + samples
-- Builds problem.json (QDOJ-style) with display_id fixed as requested
+- Builds problem.json (QDOJ-style) with display_id derived from problem URL
 - Packages into <output_qdoj_zip> with a single top-level directory:
     <top>/problem.json
     <top>/testcase/{01,01.a,02,02.a,...}
 
-Custom rules:
-- display_id is exactly "p7KOroN/jay_jayjay/yam-robots"
+Rules:
+- display_id is derived from the Polygon problem URL path
 - tags is a single element list with today's date (America/New_York) in YYYY-MM-DD
 - Replace '---' with a horizontal line <hr/> when it's the only thing on a line; otherwise with an em dash (&mdash;)
 - If there is an em dash within $...$ math, change it to a hyphen '-'
 - Warn if the sum of test-case scores is not exactly 100
+- Warn if any non-ASCII characters appear in converted HTML or sample I/O
 """
 
 import os, re, json, zipfile, tempfile, shutil, sys
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 try:
     from zoneinfo import ZoneInfo
     _TZ = ZoneInfo("America/New_York")
@@ -29,8 +31,6 @@ except Exception:
     _TZ = None
 import xml.etree.ElementTree as ET
 from urllib.parse import urlparse
-
-FIXED_DISPLAY_ID = "p7KOroN/jay_jayjay/yam-robots"
 
 def die(msg: str, code: int = 1):
     print(f"[error] {msg}", file=sys.stderr)
@@ -51,7 +51,7 @@ def strip_tex_comments(s: str) -> str:
                 # count backslashes before %
                 b = 0
                 j = i - 1
-                while j >= 0 and line[j] == '\\\\':
+                while j >= 0 and line[j] == '\\':
                     b += 1
                     j -= 1
                 if b % 2 == 0:  # unescaped
@@ -99,7 +99,7 @@ def tex_to_html(tex: str) -> str:
     # \verbX...X
     def repl_verb(m):
         return "<code>" + (m.group(2) or "").replace("<","&lt;").replace(">","&gt;") + "</code>"
-    s = re.sub(r"\\verb(.)(.*?)\\1", repl_verb, s, flags=re.DOTALL)
+    s = re.sub(r"\\verb(.)(.*?)\1", repl_verb, s, flags=re.DOTALL)
 
     # braced styles
     def brace_repl(tag):
@@ -178,7 +178,15 @@ def find_problem_xml(extract_dir: Path) -> Path:
     return sorted(cands, key=lambda p: len(p.parts))[0]
 
 
-def display_id_from_url(root) -> str | None:
+def warn_non_ascii(label: str, text: str):
+    seen = {}
+    for i, ch in enumerate(text):
+        if ord(ch) > 127 and ch not in seen:
+            seen[ch] = i
+            print(f"WARNING: non-ASCII char U+{ord(ch):04X} {repr(ch)} in {label} at position {i}", file=sys.stderr)
+
+
+def display_id_from_url(root) -> Optional[str]:
     url = root.get("url") or ""
     if not url:
         return None
@@ -255,7 +263,7 @@ def main():
             pts = t.get("points")
             try:
                 score = int(round(float(pts))) if pts is not None else 0
-            except:
+            except (ValueError, TypeError):
                 score = 0
             score_sum += score
             input_name = build_name_from_pattern(input_pat, i)
@@ -282,15 +290,19 @@ def main():
             if files["legend"].exists():
                 print("Found legend.")
                 desc_html = tex_to_html(read_text(files["legend"]))
+                warn_non_ascii("description", desc_html)
             if files["input"].exists():
                 print("Found input.")
                 input_html = tex_to_html(read_text(files["input"]))
+                warn_non_ascii("input_description", input_html)
             if files["output"].exists():
                 print("Found output.")
                 output_html = tex_to_html(read_text(files["output"]))
+                warn_non_ascii("output_description", output_html)
             if files["hint"].exists():
                 print("Found hint.")
                 hint_html = tex_to_html(read_text(files["hint"]))
+                warn_non_ascii("hint", hint_html)
             if files["name"].exists():
                 print("Found name.")
                 nm = re.sub(r"<.*?>", "", tex_to_html(read_text(files["name"]))).strip()
@@ -301,10 +313,11 @@ def main():
                 if ex.suffix == ".a":
                     continue
                 outp = sections_dir / (ex.name + ".a")
-                samples.append({
-                    "input": read_text(ex),
-                    "output": read_text(outp) if outp.exists() else ""
-                })
+                inp_text = read_text(ex)
+                out_text = read_text(outp) if outp.exists() else ""
+                warn_non_ascii(f"sample {ex.name} input", inp_text)
+                warn_non_ascii(f"sample {ex.name} output", out_text)
+                samples.append({"input": inp_text, "output": out_text})
                 print("Found example:", ex)
 
         # Detect SPJ checker — polygon puts it under <assets> or directly under root
@@ -369,9 +382,6 @@ def main():
         }
         if spj_info:
             out["spj"] = spj_info
-        if input_html: out["input_description"] = {"format": "html", "value": input_html}
-        if output_html: out["output_description"] = {"format": "html", "value": output_html}
-        if hint_html: out["hint"] = {"format": "html", "value": hint_html}
 
         top_name = "1"
         staging_root = Path(tempfile.mkdtemp(prefix="qdoj_", dir=tmp))
@@ -414,8 +424,7 @@ def main():
 
         print(f"OK: wrote {out_zip}")
     finally:
-        # shutil.rmtree(tmp, ignore_errors=True)
-        pass
+        shutil.rmtree(tmp, ignore_errors=True)
 
 if __name__ == "__main__":
     main()
