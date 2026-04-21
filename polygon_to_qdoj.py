@@ -193,7 +193,8 @@ def display_id_from_url(root) -> Optional[str]:
     try:
         u = urlparse(url)
         path = (u.path or "").strip("/")
-        return path or None
+        first = path.split("/")[0] if path else None
+        return first or None
     except Exception:
         return None
 
